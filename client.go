@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/readdle/apns2/token"
 	"golang.org/x/net/http2"
 )
 
@@ -35,9 +36,14 @@ var (
 	HTTPClientTimeout = 60 * time.Second
 )
 
+var TLSDialer = func(network, addr string, cfg *tls.Config) (net.Conn, error) {
+	return tls.DialWithDialer(&net.Dialer{Timeout: TLSDialTimeout}, network, addr, cfg)
+}
+
 // Client represents a connection with the APNs
 type Client struct {
 	HTTPClient  *http.Client
+	Token 		*token.Token
 	Certificate tls.Certificate
 	Host        string
 }
@@ -62,9 +68,7 @@ func NewClient(certificate tls.Certificate) *Client {
 	}
 	transport := &http2.Transport{
 		TLSClientConfig: tlsConfig,
-		DialTLS: func(network, addr string, cfg *tls.Config) (net.Conn, error) {
-			return tls.DialWithDialer(&net.Dialer{Timeout: TLSDialTimeout}, network, addr, cfg)
-		},
+		DialTLS: TLSDialer,
 	}
 	return &Client{
 		HTTPClient: &http.Client{
@@ -73,6 +77,18 @@ func NewClient(certificate tls.Certificate) *Client {
 		},
 		Certificate: certificate,
 		Host:        DefaultHost,
+	}
+}
+
+func NewTokenClient(token *token.Token) *Client {
+	transport := &http2.Transport{DialTLS: TLSDialer}
+	return &Client{
+		Token: token,
+		HTTPClient: &http.Client{
+			Transport: transport,
+			Timeout:   HTTPClientTimeout,
+		},
+		Host: DefaultHost,
 	}
 }
 
@@ -117,6 +133,12 @@ func (c *Client) PushWithContext(ctx Context, n *Notification) (*Response, error
 	url := fmt.Sprintf("%v/3/device/%v", c.Host, n.DeviceToken)
 	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(payload))
 	setHeaders(req, n)
+
+	// use JWT if specified
+	if c.Token != nil {
+		c.Token.RefreshJWT()
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.Token.JWT))
+	}
 
 	httpRes, err := c.requestWithContext(ctx, req)
 	if err != nil {
